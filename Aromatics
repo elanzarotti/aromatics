@@ -1,0 +1,221 @@
+#!/usr/bin/python
+
+import sys
+from math import sqrt, pi, acos
+from copy import deepcopy
+import decimal
+import getopt
+import StringIO
+from pybel import readfile, readstring
+from numpy import cross, dot, array
+from Bio.PDB.PDBParser import PDBParser
+from Bio.PDB.Polypeptide import is_aa
+from Bio.PDB.PDBIO import PDBIO
+from Bio.PDB.PDBIO import Select
+from sbg.interactions import Landscape2D
+
+def diference(c1,c2):
+        return [ c1[0]-c2[0], c1[1]-c2[1], c1[2]-c2[2] ]
+
+def distance(c1, c2):
+	return sqrt(sum([ i**2 for i in diference(c1,c2) ]))
+
+def angle(v1, v2):
+	a = acos(dot(v1, v2)/(distance((0,0,0),v1)*distance((0,0,0),v2)))
+	return a if a>0.0 else a + pi
+
+class ResidueSelect(Select):
+	def __init__(self, resid, chainid):
+		self.resid=resid
+		self.chainid=chainid
+	def accept_model(self, model):
+		return model.get_id()==0
+	def accept_chain(self, chain):
+		return chain.get_id()==self.chainid
+	def accept_residue(self, residue):
+		return residue.get_id()[1]==self.resid
+	def accept_atom(self, atom):
+		return atom.get_altloc() in [' ', 'A']
+
+class Ring():
+	def __init__(self,name,parent):
+		self.name = name
+		self.parent = parent
+
+	def __repr__(self):
+		return "%s-%s-%d-%s" % (self.parent.get_parent().get_id(), self.parent.get_resname(), self.parent.get_id()[1], self.name)
+
+	def __eq__(self, other):
+		eq = (self.name == other.name)
+		eq = eq and (self.parent.get_parent().get_id() == other.parent.get_parent().get_id())
+		eq = eq and (self.parent.get_resname() == other.parent.get_resname())
+		eq = eq and (self.parent.get_id()[1] == other.parent.get_id()[1])
+		return eq
+
+	def __ne__(self, other):
+		return (not self.__eq__(other))
+	def __hash__(self):
+		return hash(self.__repr__())
+
+	def atoms(self):
+		return [ self.parent[aname] for aname in self.name.split(":") if self.parent.has_id(aname) ]
+
+	def center(self):
+		atoms = [ a.get_coord() for a in self.atoms() if a.get_id()!="CB" ]
+		N = len(atoms)
+		x = [ acoord[0] for acoord in atoms ]
+		y = [ acoord[1] for acoord in atoms ]
+		z = [ acoord[2] for acoord in atoms ]
+		return (sum(x)/N, sum(y)/N, sum(z)/N)
+
+	def normal(self):
+		a,b = [ a.get_coord() for a in self.atoms() if a.get_id()!="CB" ][:2]
+		c = self.center()
+		ca = array(diference(a,c))
+		cb = array(diference(b,c))
+		return cross(ca,cb)
+
+	# INTERACTIONS DEFINITION
+	def interacting(self, ring, D=7.0, E=0.2):
+		if not (is_aa(self.parent.get_resname()) and is_aa(ring.parent.get_resname())): D = 7.0
+        
+		aroms = [ ]
+
+		try:
+			d = distance(self.center(), ring.center())
+			minatomd = min( [ distance(a.get_coord(), b.get_coord()) for a in self.atoms() for b in ring.atoms() ] )
+			v1 = diference(ring.center(), self.center())
+			v2 = diference(self.center(), ring.center())
+			o1 = 90-abs(90-angle(v1, self.normal())*180/pi)
+			o2 = 90-abs(90-angle(v2, ring.normal())*180/pi)
+			a = 90-abs(90-angle(self.normal(), ring.normal())*180/pi)
+		except:
+			return None
+
+		if d > D: return None
+
+		return AromaticInteraction(self, ring, d, a, o1, o2)
+
+class AromaticInteraction():
+	def __init__(self, ring1, ring2, distance, planar_angle, ori_angle1, ori_angle2):
+		self.ring1 = ring1
+		self.ring2 = ring2
+		self.distance = distance
+		self.planar_angle = planar_angle
+		self.ori_angle1 = ori_angle1
+		self.ori_angle2 = ori_angle2
+
+	def __repr__(self):
+                return "%s-%s-%f-%f-%f-%f" % (self.ring1, self.ring2, self.distance, self.planar_angle, self.ori_angle1, self.ori_angle2)
+
+	def get_dimer(self):
+		return set([ self.ring1, self.ring2 ])
+
+class Cluster():
+	def __init__(self, rings, interactions):
+		self.rings = rings
+		self.interactions = [ i for i in interactions if len(set([i.ring1, i.ring2]) & rings)==2 ]
+
+class AromaticIterator:
+	def __init__(self, structure, onlyhet=False, onlyppi=False, restrict=None):
+		self.structure = structure
+		self.onlyhet = onlyhet
+		self.onlyppi = onlyppi
+		self.restrict = restrict
+		self.io = PDBIO()
+		self.io.set_structure(self.structure)
+		self.interactions = None
+		self.clusters = None
+
+	# INTERACTORS DEFINITION
+	def get_rings(self):
+		rings=[]
+		for c in self.structure[0]:
+			for r in c:
+				ss = StringIO.StringIO()
+				self.io.save(ss, ResidueSelect(r.get_id()[1],r.get_parent().get_id()))
+				try:
+					resmol = readstring("pdb", ss.getvalue())
+				except:
+					continue
+				idx2atname, i = {}, 1
+				for atomline in ss.getvalue().split("\n"):
+					idx2atname[i] = atomline[12:16].strip()
+					i+=1
+
+				for ring in resmol.OBMol.GetSSSR():
+					if ring.IsAromatic():
+						name = [ idx2atname[a.idx] for a in resmol.atoms if ring.IsMember(a.OBAtom)]
+						name = ":".join(name)
+						rings.append( Ring( name, r ) )
+
+		return rings
+
+	def get_interactions(self):
+		if self.interactions is None:
+			self.interactions = []
+			rs = self.get_rings()
+			viewed = set([])
+
+			if self.restrict is not None:
+				targets = [ r for r in rs if (r.parent.get_parent().get_id(), r.parent.get_id()[1]) in self.restrict ]
+			else:
+				targets = [ r for r in rs if (not self.onlyhet) or (not is_aa(r.parent.get_resname())) ]
+
+			for ri in targets:
+				others = [ r for r in rs if r.parent!=ri.parent and r not in viewed and ( not self.onlyppi or r.parent.get_parent().get_id()!=ri.parent.get_parent().get_id() ) ]
+				for rj in others:
+					interaction = ri.interacting(rj)
+					if interaction is not None:
+						self.interactions.append(interaction)
+				viewed |= set([ri])
+
+		return self.interactions
+
+	def get_clusters(self):
+		if self.clusters is None:
+			self.clusters = deepcopy([ i.get_dimer() for i in self.get_interactions() ])
+			joined = True
+			while joined:
+				joined = False
+				i=0
+				while i < len(self.clusters):
+					j=i+1
+					while j < len(self.clusters):
+						if len(self.clusters[i] & self.clusters[j])>0:
+							self.clusters[i] |= self.clusters[j]
+							self.clusters.remove(self.clusters[j])
+							joined = True
+						else:
+							j+=1
+					i+=1
+
+			self.clusters = [ Cluster(c,self.get_interactions()) for c in self.clusters ]
+
+		return self.clusters
+
+if __name__ == "__main__":
+	options, args = getopt.getopt(sys.argv[1:], "i:X:DCP")
+	params = { "i" : None, "D" : None, "C" : None, "X" : None, "P" : None }
+	for option, value in options:
+		if option.startswith("-"): option = option[1:]
+		if option in params.keys(): params[option] = value
+
+	p = PDBParser()
+	s = p.get_structure(params["i"], params["i"])
+	aromiter = AromaticIterator(s, onlyhet=(params["D"] is not None), onlyppi=(params["P"] is not None), restrict=None if params["X"] is None else set([ (res.split(".")[0],int(res.split(".")[1])) for res in params["X"].split(",")]))
+
+	if params["C"] is not None:
+		cid = 1
+		for c in aromiter.get_clusters():
+			rings = ",".join([ "(%s;%d;%s;%s)" % (ring.parent.get_parent().get_id(),ring.parent.get_id()[1],ring.parent.get_resname(),ring.name) for ring in c.rings ])
+			out = "%d\t%d\t%d\t%s" % (cid, len(c.interactions), len(c.rings), rings )
+			cid+=1
+			print out
+	else:
+		for i in aromiter.get_interactions():
+			out = "%s\t%s\t%d\t%s\t" % (i.ring1.parent.get_parent().get_id(), i.ring1.parent.get_resname(), i.ring1.parent.get_id()[1], i.ring1.name)
+			out+= "%s\t%s\t%d\t%s\t" % (i.ring2.parent.get_parent().get_id(), i.ring2.parent.get_resname(), i.ring2.parent.get_id()[1], i.ring2.name)
+			out+= "%f\t%f\t%f\t%f" % (i.distance, i.planar_angle, i.ori_angle1, i.ori_angle2)
+			print params["i"].split(".")[0]+"\t"+out
+
