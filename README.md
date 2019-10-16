@@ -2,7 +2,7 @@
 Aromatic clusters in proteins
 
 # To import database with Mysql
-> cat aromatics.sql.gz.part-* > aromatics.sql.gz && zcat aromatics.sql.gz | mysql <Database name>
+> cat aromatics.sql.gz.part-* > aromatics.sql.gz && zcat aromatics.sql.gz | mysql \<Database name\>
 
 # To search for interactions
 > ./Aromatics -i \<pdbfile\>
