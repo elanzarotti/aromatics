@@ -5,14 +5,14 @@ from math import sqrt, pi, acos
 from copy import deepcopy
 import decimal
 import getopt
-import StringIO
-from pybel import readfile, readstring
+import io
+from openbabel.pybel import readfile, readstring
 from numpy import cross, dot, array
 from Bio.PDB.PDBParser import PDBParser
 from Bio.PDB.Polypeptide import is_aa
 from Bio.PDB.PDBIO import PDBIO
 from Bio.PDB.PDBIO import Select
-from sbg.interactions import Landscape2D
+#from sbg.interactions import Landscape2D
 
 def diference(c1,c2):
         return [ c1[0]-c2[0], c1[1]-c2[1], c1[2]-c2[2] ]
@@ -132,7 +132,7 @@ class AromaticIterator:
 		rings=[]
 		for c in self.structure[0]:
 			for r in c:
-				ss = StringIO.StringIO()
+				ss = io.StringIO()
 				self.io.save(ss, ResidueSelect(r.get_id()[1],r.get_parent().get_id()))
 				try:
 					resmol = readstring("pdb", ss.getvalue())
@@ -199,7 +199,7 @@ if __name__ == "__main__":
 	params = { "i" : None, "D" : None, "C" : None, "X" : None, "P" : None }
 	for option, value in options:
 		if option.startswith("-"): option = option[1:]
-		if option in params.keys(): params[option] = value
+		if option in list(params.keys()): params[option] = value
 
 	p = PDBParser()
 	s = p.get_structure(params["i"], params["i"])
@@ -211,11 +211,11 @@ if __name__ == "__main__":
 			rings = ",".join([ "(%s;%d;%s;%s)" % (ring.parent.get_parent().get_id(),ring.parent.get_id()[1],ring.parent.get_resname(),ring.name) for ring in c.rings ])
 			out = "%d\t%d\t%d\t%s" % (cid, len(c.interactions), len(c.rings), rings )
 			cid+=1
-			print out
+			print(out)
 	else:
 		for i in aromiter.get_interactions():
 			out = "%s\t%s\t%d\t%s\t" % (i.ring1.parent.get_parent().get_id(), i.ring1.parent.get_resname(), i.ring1.parent.get_id()[1], i.ring1.name)
 			out+= "%s\t%s\t%d\t%s\t" % (i.ring2.parent.get_parent().get_id(), i.ring2.parent.get_resname(), i.ring2.parent.get_id()[1], i.ring2.name)
 			out+= "%f\t%f\t%f\t%f" % (i.distance, i.planar_angle, i.ori_angle1, i.ori_angle2)
-			print params["i"].split(".")[0]+"\t"+out
+			print(params["i"].split(".")[0]+"\t"+out)
 
